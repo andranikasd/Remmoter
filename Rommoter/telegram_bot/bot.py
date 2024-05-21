@@ -1,9 +1,9 @@
 # telegram_bot/bot.py
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 from config import config
-from job_sources import fetch_all_jobs
+from job_sources.remoteok import RemoteOK
 
 # Configure logging
 logging.basicConfig(
@@ -12,157 +12,114 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Extract relevant tags for jobs
-def extract_tags(jobs) -> set:
-    tags = set()
-    for job in jobs:
-        tags.update(tag.lower() for tag in job['tags'])
-    return tags
+class JobBot:
+    def __init__(self, token):
+        self.application = Application.builder().token(token).build()
+        self.job_source = RemoteOK()  # Using RemoteOK as the job source
 
-# Step 1: Choose profession and experience level
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    professions = ['software engineer', 'data scientist', 'devops engineer', 'product manager']
-    experience_levels = ['junior', 'middle', 'senior']
-    
-    profession_keyboard = [
-        [InlineKeyboardButton(profession.title(), callback_data=f'profession_{profession}')] for profession in professions
-    ]
-    
-    experience_keyboard = [
-        [InlineKeyboardButton(level.title(), callback_data=f'level_{level}')] for level in experience_levels
-    ]
-    
-    reply_markup_profession = InlineKeyboardMarkup(profession_keyboard)
-    await update.message.reply_text('Select your profession:', reply_markup=reply_markup_profession)
-    
-    reply_markup_experience = InlineKeyboardMarkup(experience_keyboard)
-    await update.message.reply_text('Select your experience level:', reply_markup=reply_markup_experience)
+        self.application.add_handler(CommandHandler("start", self.start))
+        self.application.add_handler(CallbackQueryHandler(self.handle_callback_query))
+        self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
 
-# Callback query handler for profession and experience level selection
-async def profession_experience_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
+    def run(self):
+        self.application.run_polling()
 
-    selected_data = query.data
-    if selected_data.startswith('profession_'):
-        context.user_data['profession'] = selected_data.split('_')[1]
-    elif selected_data.startswith('level_'):
-        context.user_data['experience_level'] = selected_data.split('_')[1]
-    
-    if 'profession' in context.user_data and 'experience_level' in context.user_data:
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=f"Selected Profession: {context.user_data['profession'].title()}\nSelected Experience Level: {context.user_data['experience_level'].title()}"
-        )
-        await ask_tag_generation_method(update, context)
+    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        logger.info("Received /start command")
+        professions = ['software engineer', 'data scientist', 'devops engineer', 'product manager']
 
-# Step 2: Ask to autogenerate tags or enter tags manually
-async def ask_tag_generation_method(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    keyboard = [
-        [InlineKeyboardButton("Autogenerate Tags", callback_data='autogenerate_tags')],
-        [InlineKeyboardButton("Enter Tags Manually", callback_data='manual_tags')]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await context.bot.send_message(chat_id=update.effective_chat.id, text='How would you like to enter tags?', reply_markup=reply_markup)
+        profession_keyboard = [
+            [InlineKeyboardButton(profession.title(), callback_data=f'profession_{profession}')] for profession in professions
+        ]
 
-# Step 3: Generate/Grid Enter Tags
-async def tag_generation_method(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
+        reply_markup_profession = InlineKeyboardMarkup(profession_keyboard)
+        await update.message.reply_text('Select your profession:', reply_markup=reply_markup_profession)
 
-    selected_data = query.data
-    if selected_data == 'autogenerate_tags':
-        await autogenerate_tags(update, context)
-    elif selected_data == 'manual_tags':
-        await manual_tag_entry(update, context)
+    async def handle_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        await query.answer()
 
-async def autogenerate_tags(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Autogenerate tags based on profession and experience level (simple example)
-    profession = context.user_data.get('profession', 'devops engineer')
-    experience_level = context.user_data.get('experience_level', 'junior')
-    
-    autogenerated_tags = {
-        'devops engineer': ['aws', 'docker', 'kubernetes', 'ci/cd', 'terraform', 'linux', 'jenkins', 'ansible'],
-        'software engineer': ['python', 'javascript', 'react', 'node.js', 'java', 'c++', 'ruby', 'html/css'],
-        'data scientist': ['python', 'pandas', 'machine learning', 'deep learning', 'tensorflow', 'numpy', 'statistics', 'r'],
-        'product manager': ['agile', 'scrum', 'product roadmap', 'user stories', 'market research', 'ux/ui', 'business analysis']
-    }
-    
-    selected_tags = autogenerated_tags.get(profession, [])
-    context.user_data['selected_tags'] = set(selected_tags)
-    context.user_data['jobs'] = fetch_all_jobs()  # Ensure jobs are fetched and stored
-    
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Autogenerated Tags: {', '.join(selected_tags)}")
-    await display_start_search_button(update, context)
+        logger.info(f"Handling callback query: {query.data}")
 
-async def manual_tag_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    jobs = fetch_all_jobs()
-    tags = extract_tags(jobs)
-    context.user_data['jobs'] = jobs
-    context.user_data['selected_tags'] = set()
+        if query.data.startswith('profession_'):
+            context.user_data['profession'] = query.data.split('_')[1]
+            logger.info(f"Selected profession: {context.user_data['profession']}")
+            await self.ask_tag_generation_method(update, context)
+        elif query.data == 'autogenerate_tags':
+            context.user_data['tags_method'] = 'autogenerate'
+            await self.autogenerate_tags(update, context)
+        elif query.data == 'manual_tags':
+            context.user_data['tags_method'] = 'manual'
+            await self.manual_tag_entry(update, context)
+        elif query.data == 'start_searching':
+            await self.start_searching(update, context)
 
-    keyboard = create_tag_keyboard(tags, context.user_data['selected_tags'])
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await context.bot.send_message(chat_id=update.effective_chat.id, text='Select tags to search for jobs:', reply_markup=reply_markup)
+    async def ask_tag_generation_method(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        logger.info("Asking for tag generation method")
+        keyboard = [
+            [InlineKeyboardButton("Autogenerate Tags", callback_data='autogenerate_tags')],
+            [InlineKeyboardButton("Enter Tags Manually", callback_data='manual_tags')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await context.bot.send_message(chat_id=update.effective_chat.id, text='How would you like to enter tags?', reply_markup=reply_markup)
 
-# Step 4: Start Searching
-async def display_start_search_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    keyboard = [[InlineKeyboardButton("Start Searching", callback_data='start_searching')]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await context.bot.send_message(chat_id=update.effective_chat.id, text='Press "Start Searching" to begin:', reply_markup=reply_markup)
+    async def autogenerate_tags(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        logger.info("Autogenerating tags")
+        profession = context.user_data.get('profession', 'devops engineer')
 
-async def start_searching(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
-    await search_jobs(update, context)
+        autogenerated_tags = {
+            'devops engineer': ['aws', 'docker', 'kubernetes', 'ci/cd', 'terraform', 'linux', 'jenkins', 'ansible'],
+            'software engineer': ['python', 'javascript', 'react', 'node.js', 'java', 'c++', 'ruby', 'html/css'],
+            'data scientist': ['python', 'pandas', 'machine learning', 'deep learning', 'tensorflow', 'numpy', 'statistics', 'r'],
+            'product manager': ['agile', 'scrum', 'product roadmap', 'user stories', 'market research', 'ux/ui', 'business analysis']
+        }
 
-# Search jobs based on selected tags
-async def search_jobs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    selected_tags = context.user_data['selected_tags']
-    jobs = context.user_data['jobs']
-    matching_jobs = []
+        selected_tags = autogenerated_tags.get(profession, [])
+        context.user_data['selected_tags'] = set(selected_tags)
+        context.user_data['jobs'] = self.job_source.fetch_jobs()
 
-    for job in jobs:
-        if 'tags' in job and selected_tags.intersection(set(job['tags'])):
-            matching_jobs.append(job)
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Autogenerated Tags: {', '.join(selected_tags)}")
+        await self.display_start_search_button(update, context)
 
-    if not matching_jobs:
-        await update.callback_query.edit_message_text('No job postings found with the selected tags.')
-        return
+    async def manual_tag_entry(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        logger.info("Entering tags manually")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text='Please enter the tags you want to search for, separated by commas.')
 
-    for job in matching_jobs:
-        message = (
-            f"Title: {job.get('position', 'N/A')}\n"
-            f"Company: {job.get('company', 'N/A')}\n"
-            f"Location: {job.get('location', 'N/A')}\n"
-            f"Link: {job.get('url', 'N/A')}"
-        )
-        await update.callback_query.message.reply_text(message)
+    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user_input = update.message.text
+        tags = [tag.strip().lower() for tag in user_input.split(',')]
+        context.user_data['selected_tags'] = set(tags)
+        context.user_data['jobs'] = self.job_source.fetch_jobs()
 
-# Create inline keyboard with tags in a grid layout
-def create_tag_keyboard(tags, selected_tags):
-    keyboard = []
-    row = []
-    for i, tag in enumerate(tags):
-        if len(row) == 3:
-            keyboard.append(row)
-            row = []
-        row.append(InlineKeyboardButton(f"{'✓ ' if tag in selected_tags else ''}{tag}", callback_data=tag))
-    if row:
-        keyboard.append(row)
-    keyboard.append([InlineKeyboardButton("Start Searching", callback_data='start_searching')])
-    return keyboard
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Entered Tags: {', '.join(tags)}")
+        await self.display_start_search_button(update, context)
 
-def main() -> None:
-    application = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
+    async def display_start_search_button(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        keyboard = [[InlineKeyboardButton("Start Searching", callback_data='start_searching')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await context.bot.send_message(chat_id=update.effective_chat.id, text='Press "Start Searching" to begin:', reply_markup=reply_markup)
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(profession_experience_selection, pattern='^(profession_|level_)'))
-    application.add_handler(CallbackQueryHandler(tag_generation_method, pattern='^(autogenerate_tags|manual_tags)$'))
-    application.add_handler(CallbackQueryHandler(start_searching, pattern='^start_searching$'))
-    application.add_handler(CallbackQueryHandler(profession_experience_selection, pattern='^(?!start_searching|autogenerate_tags|manual_tags|profession_|level_).*'))
+    async def start_searching(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        selected_tags = context.user_data['selected_tags']
+        jobs = context.user_data['jobs']
+        matching_jobs = [job for job in jobs if selected_tags.intersection(set(job['tags']))]
 
-    application.run_polling()
+        if not matching_jobs:
+            await update.callback_query.edit_message_text('No job postings found with the selected tags.')
+            return
+
+        for job in matching_jobs:
+            message = (
+                f"Title: {job.get('title', 'N/A')}\n"
+                f"Company: {job.get('company', 'N/A')}\n"
+                f"Location: {job.get('location', 'N/A')}\n"
+                f"Link: {job.get('url', 'N/A')}"
+            )
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=message)
+
+def main():
+    bot = JobBot(config.TELEGRAM_BOT_TOKEN)
+    bot.run()
 
 if __name__ == '__main__':
     main()

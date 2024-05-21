@@ -1,27 +1,45 @@
 # job_sources/djinni.py
 import requests
+from config import config
 from bs4 import BeautifulSoup
+import logging
 
-DJINNI_URL = 'https://djinni.co/jobs/'
+logger = logging.getLogger(__name__)
 
 def fetch_djinni_jobs():
-    jobs = []
-    response = requests.get(DJINNI_URL)
-    if response.status_code == 200:
-        soup = BeautifulSoup(response.text, 'html.parser')
-        job_listings = soup.find_all('li', class_='list-jobs__item')
+    try:
+        response = requests.get(config.DJINNI_API_URL)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.content, 'html.parser')
+            jobs = []
+            job_listings = soup.find_all('div', class_='list-jobs__item')
 
-        for job in job_listings:
-            title = job.find('div', class_='list-jobs__title').get_text(strip=True).lower()
-            company = job.find('div', class_='list-jobs__details__info').get_text(strip=True).lower()
-            location = job.find('span', class_='location-text').get_text(strip=True).lower() if job.find('span', class_='location-text') else 'N/A'
-            url = f"https://djinni.co{job.find('a', class_='profile')['href']}"
-            tags = [tag.get_text(strip=True).lower() for tag in job.find_all('a', class_='job-tag')]
-            jobs.append({
-                'title': title,
-                'company': company,
-                'location': location,
-                'url': url,
-                'tags': tags
-            })
-    return jobs
+            for job in job_listings:
+                title_element = job.find('div', class_='list-jobs__title')
+                company_element = job.find('div', class_='list-jobs__details__info')
+                location_element = job.find('span', class_='location-text')
+
+                if not (title_element and company_element and location_element):
+                    logger.warning(f"Skipping incomplete job listing: {job}")
+                    continue
+
+                title = title_element.get_text(strip=True).lower()
+                company = company_element.get_text(strip=True).lower()
+                location = location_element.get_text(strip=True).lower()
+                url = config.DJINNI_API_URL
+
+                jobs.append({
+                    'title': title,
+                    'company': company,
+                    'location': location,
+                    'url': url,
+                    'tags': ['djinni', 'remote']
+                })
+
+            return jobs
+        else:
+            logger.error(f"Failed to fetch jobs from Djinni. Status code: {response.status_code}")
+            return []
+    except Exception as e:
+        logger.exception(f"An error occurred while fetching jobs from Djinni: {e}")
+        return []
